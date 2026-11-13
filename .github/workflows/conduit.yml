@@ -1,0 +1,142 @@
+name: Conduit JDBC and Vert.x
+
+on:
+  push:
+    branches: ['**']
+    tags: ['conduit-v*']
+    paths:
+      - 'submissions/scala-zio-vertx-quill-ffebr/**'
+      - '.github/workflows/conduit.yml'
+      - '.github/workflows/test.yml'
+      - 'test/**'
+      - 'seed/**'
+      - 'bench/**'
+      - 'schema.sql'
+      - 'SPEC.md'
+  pull_request:
+    paths:
+      - 'submissions/scala-zio-vertx-quill-ffebr/**'
+      - '.github/workflows/conduit.yml'
+      - '.github/workflows/test.yml'
+      - 'test/**'
+      - 'seed/**'
+      - 'bench/**'
+      - 'schema.sql'
+      - 'SPEC.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: conduit-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  APP: submissions/scala-zio-vertx-quill-ffebr
+
+jobs:
+  verify:
+    if: github.repository == 'ffebr/vertx-jdbc-challenge'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:18-bookworm@sha256:ece55f7868da684e400f82f1030a050718adbdd65c23aa500c486f6e2950dc0f
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ['5432:5432']
+        options: --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 30
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: '5432'
+      PGUSER: postgres
+      PGPASSWORD: postgres
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: sbt
+          cache-dependency-path: |
+            submissions/scala-zio-vertx-quill-ffebr/build.sbt
+            submissions/scala-zio-vertx-quill-ffebr/project/*.sbt
+            submissions/scala-zio-vertx-quill-ffebr/project/build.properties
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: bench/go.mod
+          cache-dependency-path: bench/go.sum
+      - name: PostgreSQL client and verification tools
+        run: sudo apt-get update -qq && sudo apt-get install --yes --no-install-recommends postgresql-client curl python3
+      - name: Original deterministic seed and fingerprint
+        run: bash seed/make-seed.sh --dev
+      - name: Shared unit tests, original API tests, golden equivalence and distributions
+        run: bash "$APP/ci/verify.sh"
+      - name: Build and verify both delivery images
+        env:
+          CONDUIT_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          for variant in jdbc native; do
+            docker build --build-arg "VARIANT=$variant" \
+              --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+              --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+              --tag "conduit:$variant" "$APP"
+            bash "$APP/ci/check-container.sh" "$variant" "conduit:$variant"
+          done
+          docker save conduit:jdbc conduit:native | gzip -n > "$RUNNER_TEMP/conduit-images.tar.gz"
+      - name: Runtime distributions
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: conduit-distributions
+          path: submissions/scala-zio-vertx-quill-ffebr/dist/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Tested images for delivery
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: conduit-images
+          path: ${{ runner.temp }}/conduit-images.tar.gz
+          if-no-files-found: error
+          retention-days: 3
+      - name: Test reports and normalized transcripts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: conduit-verification
+          path: |
+            submissions/scala-zio-vertx-quill-ffebr/reports/
+            submissions/scala-zio-vertx-quill-ffebr/*/target/test-reports/
+          if-no-files-found: warn
+          retention-days: 14
+
+  publish:
+    needs: verify
+    if: github.repository == 'ffebr/vertx-jdbc-challenge' && github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/conduit-v'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: conduit-images
+          path: ${{ runner.temp }}/conduit-images
+      - name: Load the verified images
+        run: docker load --input "$RUNNER_TEMP/conduit-images/conduit-images.tar.gz"
+      - name: Log in to the fork's container registry
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Publish the verified image revisions
+        run: bash "$APP/ci/publish-images.sh"
+      - name: Log out
+        if: always()
+        run: docker logout ghcr.io

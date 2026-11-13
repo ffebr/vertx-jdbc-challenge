@@ -1,0 +1,12 @@
+**
+!Dockerfile
+!jdbc/
+!jdbc/target/
+!jdbc/target/stage/
+!jdbc/target/stage/lib/
+!jdbc/target/stage/lib/**
+!native/
+!native/target/
+!native/target/stage/
+!native/target/stage/lib/
+!native/target/stage/lib/**

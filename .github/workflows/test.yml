@@ -11,6 +11,8 @@ permissions:
 
 jobs:
   find:
+    # This fork has a dedicated dual-backend application workflow.
+    if: github.repository != 'ffebr/vertx-jdbc-challenge'
     runs-on: ubuntu-24.04
     outputs:
       dirs: ${{ steps.dirs.outputs.dirs }}
