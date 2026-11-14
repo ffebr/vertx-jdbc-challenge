@@ -28,15 +28,21 @@ commands and counts. Publishing or challenge submission is a separate action.
 
 ## Acceptance record
 
-All delivery items above are complete: both original API runs pass 197 steps,
-both shared unit runs pass 9 tests, both normalized transcripts match the golden,
-and the runtime boundary and formatting checks pass. The default remote source
-pin builds both executors without registry credentials.
+Both original API runs pass 197 steps and both normalized transcripts match
+one another and the unchanged golden. The unit suites now pass 14 JDBC and
+16 native tests, including URL credentials with plus signs, reserved characters
+and Unicode. Runtime and formatting checks pass for both variants.
 
-The application exposed and now uses a native PostgreSQL optional-fallback fix
-on `ffebr/zio-quill-vertx`, branch `fix/postgres-option-fallback`, commit
-`4dcd91128fda7d79e0614b1cb6abe2ca35258d6c`. Its PostgreSQL suite passes 178
-tests. The published alpha.1 is unchanged; a future driver release still follows
-the fork's complete release matrix. The follow-up delivery task adds portable CI,
-checksummed runtime distributions, tested nonroot images and fork-only GHCR
-delivery after successful verification. Load benchmarking remains separate.
+The narrow optional-fallback patch at `4dcd9112` has been replaced by general
+native parameter binding at `5a29bb669109b81694a763ade3e6221f861ef702`.
+The new driver regressions cover optional predicates, mapped/custom encoders,
+decimal/array values, JSON/JSONB, prepared/batch execution, cursor streams and
+enum inference. PostgreSQL passes 197 tests per Scala version; MySQL and MariaDB
+each pass 21. The release workflow still requires DB2 on both Scala versions.
+
+The app source pin uses that revision. Published mode resolves the native
+runtime from GitHub Packages, while JDBC retains the same source revision.
+The driver's published-consumer workflow verifies the source pin against the
+release tag, audits exact runtime versions and runs the original API/transcript
+checks. Registry publication and fork-only GHCR delivery remain CI actions;
+load benchmarking remains separate.

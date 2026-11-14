@@ -1,6 +1,7 @@
 package conduit.persistence
 
 import conduit.AppConfig
+import conduit.PostgresDatabaseUrl
 import conduit.domain.AppError
 import io.vertx.core.Vertx
 import io.vertx.pgclient.{PgConnectOptions, PgException}
@@ -21,10 +22,13 @@ final class Database private (pool: Pool) {
 object Database {
   val backendName                                                            = "native Vert.x"
   def make(config: AppConfig, vertx: Vertx): ZIO[Scope, Throwable, Database] =
-    VertxPool.fromVertx(
-      vertx,
-      PgConnectOptions.fromUri(config.databaseUrl).setCachePreparedStatements(true),
-      new PoolOptions().setMaxSize(16)
-    )
-      .build.map(environment => new Database(environment.get[Pool]))
+    ZIO.fromEither(PostgresDatabaseUrl.parse(config.databaseUrl))
+      .mapError(message => new IllegalArgumentException(message))
+      .flatMap { databaseUrl =>
+        VertxPool.fromVertx(
+          vertx,
+          PgConnectOptions.fromUri(databaseUrl.nativeUri).setCachePreparedStatements(true),
+          new PoolOptions().setMaxSize(16)
+        ).build.map(environment => new Database(environment.get[Pool]))
+      }
 }

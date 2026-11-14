@@ -7,10 +7,35 @@ val vertxVersion   = "4.5.36"
 val tapirVersion   = "1.11.44"
 val stage          = taskKey[File]("Stage a standalone application and its runtime dependencies")
 val submissionRoot = file(".").getCanonicalFile
+
+val publishedQuillVersion = sys.props.get("conduit.quill.published.version").map { version =>
+  require(
+    version.matches("[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?") && !version.endsWith("SNAPSHOT"),
+    "conduit.quill.published.version must be an immutable release version"
+  )
+  version
+}
+val quillPackageResolver =
+  "GitHub Packages" at "https://maven.pkg.github.com/ffebr/zio-quill-vertx"
+val quillPackageCredentials =
+  publishedQuillVersion.toSeq.map { _ =>
+    val username = sys.env.getOrElse(
+      "GITHUB_PACKAGES_USER",
+      sys.error("GITHUB_PACKAGES_USER is required in published mode")
+    )
+    val token = sys.env.getOrElse(
+      "GITHUB_PACKAGES_TOKEN",
+      sys.error("GITHUB_PACKAGES_TOKEN is required in published mode")
+    )
+    require(username.nonEmpty && token.nonEmpty, "GitHub Packages credentials must not be empty")
+    Credentials("GitHub Package Registry", "maven.pkg.github.com", username, token)
+  }
+ThisBuild / resolvers ++= publishedQuillVersion.toSeq.map(_ => quillPackageResolver)
+ThisBuild / credentials ++= quillPackageCredentials
 // Compare the original JDBC executor with the native executor on the same Quill
 // source revision and namespace, rather than mixing unrelated Quill releases.
 val quillSource = sys.props.get("conduit.quill.source").map(path => file(path).toURI)
-  .getOrElse(uri("https://github.com/ffebr/zio-quill-vertx.git#4dcd91128fda7d79e0614b1cb6abe2ca35258d6c"))
+  .getOrElse(uri("https://github.com/ffebr/zio-quill-vertx.git#5a29bb669109b81694a763ade3e6221f861ef702"))
 
 lazy val common = Seq(
   Compile / unmanagedSourceDirectories += submissionRoot / "shared" / "src" / "main" / "scala",
@@ -60,8 +85,18 @@ lazy val jdbc = project.in(file("jdbc")).dependsOn(ProjectRef(quillSource, "quil
   )
 )
 
-lazy val native = project.in(file("native")).dependsOn(ProjectRef(quillSource, "quill-vertx-zio"))
-  .settings(common).settings(name := "conduit-native")
+lazy val native = {
+  val base = Project("native", file("native")).settings(common).settings(
+    name := "conduit-native",
+    libraryDependencies ++= publishedQuillVersion.toSeq.map { version =>
+      "io.github.ffebr" %% "quill-vertx-zio" % version
+    }
+  )
+  publishedQuillVersion match {
+    case Some(_) => base
+    case None    => base.dependsOn(ProjectRef(quillSource, "quill-vertx-zio"))
+  }
+}
 
 lazy val root = project.in(file(".")).aggregate(jdbc, native).settings(
   name           := "conduit-quill-comparison",

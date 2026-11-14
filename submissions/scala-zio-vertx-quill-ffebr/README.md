@@ -8,16 +8,18 @@ domain, service and QDSL repository files are shared sources compiled twice.
 Only `persistence.Database` and dependency wiring differ.
 
 Both executors use the fork's pinned source commit
-`4dcd91128fda7d79e0614b1cb6abe2ca35258d6c`. The JDBC executor is the original
+`5a29bb669109b81694a763ade3e6221f861ef702`. The JDBC executor is the original
 Quill JDBC/ZIO implementation; the native executor includes the PostgreSQL
-optional-fallback fix discovered by this application. The shared core and
+typed-parameter fix discovered by this application. The shared core and
 `zio.quill` namespace are identical. The old upstream 4.8.5 binary uses a
 different `io.getquill` namespace and would obscure that comparison.
 
 The published native `0.1.0-alpha.1` has a PostgreSQL `42P18` failure for certain
 lifted optional updates. This app uses the corrected source revision, with
-unchanged `Option.getOrElse` / `orElse` QDSL. The fix is on the user's fork in
-`master` and `fix/postgres-option-fallback`; it is not a new registry release.
+unchanged `Option.getOrElse` / `orElse` QDSL. The fix also covers optional
+filters, decimal and array parameters, JSON/JSONB, and cursor streams.
+Registry releases must pass the driver's database/Scala CI matrix; the separate
+published-consumer check below verifies the delivered artifacts.
 
 ## Build and run
 
@@ -36,6 +38,33 @@ by the challenge. Each executable has a 16-connection database pool. Native
 HTTP and SQL share the scoped Vert.x instance. JDBC runs blocking database
 calls on ZIO's blocking executor; bcrypt is also explicitly blocking.
 
+### Published native consumer check
+
+The normal app build remains source-pinned and needs no GitHub Packages
+credentials. To opt in to a released native Vert.x driver artifact, pass its
+published version to sbt and provide read access to the driver's GitHub
+Packages repository:
+
+```sh
+GITHUB_PACKAGES_USER='<github-username>' \
+GITHUB_PACKAGES_TOKEN='<read:packages-token>' \
+./dev/sbt.sh '-Dconduit.quill.published.version=<published-version>' native/test native/stage
+```
+
+This option changes only the native executor dependency. JDBC continues to use
+the pinned source project, and omitting the option leaves both variants on the
+default source-pinned build.
+
+The driver repository's
+`.github/workflows/vertx-published-consumer.yml` runs after a successful
+`Native Vert.x` release workflow. It resolves the app's `main` commit once,
+then builds and tests both backends from that exact commit against the
+published native artifact. The check stages and audits both runtime closures,
+runs the original API conformance and golden transcript checks, and verifies
+the produced packages. It uses the driver repository's own `GITHUB_TOKEN` with
+`packages: read`; no app-side package token is needed. The workflow also
+supports manual dispatch with an immutable release version and app commit.
+
 ## Design
 
 - Domain types and repository ports have no HTTP or backend dependencies.
@@ -53,21 +82,25 @@ calls on ZIO's blocking executor; bcrypt is also explicitly blocking.
 
 ## Verification
 
-Validated on 2026-11-13 with the default remote source pin and the original
-PostgreSQL 18 development seed:
+Validated on 2026-11-14 against the pinned driver revision through a local
+checkout and the original PostgreSQL 18 development seed. CI repeats the checks
+using the default remote source pin:
 
 | Check | JDBC | Native Vert.x |
 | --- | --- | --- |
 | Original `test/run.sh` conformance | 197 / 197 | 197 / 197 |
-| Shared security, validation and DTO unit tests | 9 / 9 | 9 / 9 |
+| Security, validation, DTO and connection URL unit tests | 14 / 14 | 16 / 16 |
 | Normalized transcript versus original golden | byte-identical | byte-identical |
 | Formatting and standalone staging | passed | passed |
 
 Both transcripts and `bench/cmd/conformance/golden-dev.jsonl` have SHA-256
 `b017dae7bc5b43f6321a4722ef0d95cea112e73cb66e7590ed12b5bc1e256878`.
 The challenge schema, specifications, original tests and golden file are unchanged.
-The PostgreSQL-focused driver suite also passed 178 tests on Scala 2.13.16,
-including the new optional fallback and volatile expression regressions.
+The PostgreSQL-focused driver suite passed 197 tests on Scala 2.13.16 and
+2.12.20, including lifted NULLs, mapped encoders, decimal/array parameters,
+JSON/JSONB, prepared execution, streaming and enum comparisons. MySQL and
+MariaDB each passed another 21 tests on both Scala versions. DB2 remains a
+required release CI job; its restored local database has a filesystem I/O error.
 
 From this directory:
 

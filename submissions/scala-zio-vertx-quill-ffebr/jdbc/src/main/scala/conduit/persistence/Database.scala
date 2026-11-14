@@ -1,12 +1,11 @@
 package conduit.persistence
 
 import conduit.AppConfig
+import conduit.PostgresDatabaseUrl
 import conduit.domain.AppError
 import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 import io.vertx.core.Vertx
 import javax.sql.DataSource
-import java.net.{URI, URLDecoder}
-import java.nio.charset.StandardCharsets
 import java.sql.SQLException
 import zio.{Scope, Task, ZEnvironment, ZIO}
 import zio.quill.{PostgresZioJdbcContext, SnakeCase}
@@ -24,16 +23,12 @@ object Database {
   val backendName                                                            = "JDBC"
   def make(config: AppConfig, vertx: Vertx): ZIO[Scope, Throwable, Database] =
     ZIO.acquireRelease(ZIO.attemptBlocking {
-      val uri = new URI(config.databaseUrl)
-      require(Set("postgres", "postgresql")(uri.getScheme), "DATABASE_URL must use PostgreSQL")
-      val credentials                   = Option(uri.getRawUserInfo).getOrElse("").split(":", 2)
-      def decode(value: String): String = URLDecoder.decode(value, StandardCharsets.UTF_8.name())
-      val pool                          = new HikariConfig()
-      val port                          = if (uri.getPort < 0) 5432 else uri.getPort
-      val query                         = Option(uri.getRawQuery).fold("")("?" + _)
-      pool.setJdbcUrl(s"jdbc:postgresql://${uri.getHost}:$port${uri.getRawPath}$query")
-      if (credentials.headOption.exists(_.nonEmpty)) pool.setUsername(decode(credentials(0)))
-      if (credentials.length > 1) pool.setPassword(decode(credentials(1)))
+      val databaseUrl = PostgresDatabaseUrl.parse(config.databaseUrl)
+        .fold(message => throw new IllegalArgumentException(message), identity)
+      val pool = new HikariConfig()
+      pool.setJdbcUrl(databaseUrl.jdbcUrl)
+      databaseUrl.username.foreach(pool.setUsername)
+      databaseUrl.password.foreach(pool.setPassword)
       pool.setMaximumPoolSize(16)
       pool.setMinimumIdle(2)
       pool.setPoolName("conduit-jdbc")
