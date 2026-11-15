@@ -51,3 +51,13 @@ actual two String parameters, without simulating a database call. The checked
 page had no document overflow, JavaScript errors, failed runtime assets,
 external runtime requests or violations in the performed axe WCAG A/AA audit.
 These browser checks are local evidence, not a claim of accessibility certification.
+
+## Hosted verification
+
+For commit `4fe26a1ea8c704745c0aa2cc8c7167f074244916`, the
+[application verification](https://github.com/ffebr/vertx-jdbc-challenge/actions/runs/43766761659/job/132973551635)
+and [image delivery](https://github.com/ffebr/vertx-jdbc-challenge/actions/runs/43766761659/job/132974405447)
+jobs succeeded. The hosted verification includes the original API and golden
+checks against both nonroot delivery images. Pages is a separate deployment
+job; its initial attempt built the report artifact but required the repository
+administrator to enable the GitHub Actions publishing source before deployment.
