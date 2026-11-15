@@ -6,3 +6,6 @@ project/target/
 *.jsonl
 dist/
 reports/
+site/_build/
+site/_preview/
+site/__pycache__/

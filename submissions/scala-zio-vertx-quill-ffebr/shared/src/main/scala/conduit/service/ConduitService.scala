@@ -18,6 +18,15 @@ final class ConduitService(
     if (value == null || value.isEmpty) zio.ZIO.fail(AppError.Validation(s"$name must be a non-empty string"))
     else zio.ZIO.succeed(value)
 
+  private def optionalRequired(value: Option[String], name: String): IO[AppError, Option[String]] =
+    value match {
+      case None        => zio.ZIO.succeed(None)
+      case Some(value) => required(value, name).map(Some(_))
+    }
+
+  private def orNotFound[A](value: Option[A]): IO[AppError, A] =
+    value.fold[IO[AppError, A]](zio.ZIO.fail(AppError.NotFound()))(zio.ZIO.succeed(_))
+
   private def session(user: UserRecord, token: String): UserSession =
     UserSession(user.email, token, user.username, user.bio, user.image)
 
@@ -47,35 +56,33 @@ final class ConduitService(
     zio.ZIO.succeed(session(principal.user, principal.token))
 
   def updateUser(principal: Principal, input: UpdateUser): IO[AppError, UserSession] = for {
-    email <-
-      input.email.fold[IO[AppError, Option[String]]](zio.ZIO.succeed(None))(v => required(v, "Email").map(Some(_)))
-    username <- input.username.fold[IO[AppError, Option[String]]](zio.ZIO.succeed(None))(v =>
-                  required(v, "Username").map(Some(_))
-                )
-    password <- input.password.fold[IO[AppError, Option[String]]](zio.ZIO.succeed(None))(v =>
-                  required(v, "Password").map(Some(_))
-                )
-    hash    <- password.fold[IO[AppError, Option[String]]](zio.ZIO.succeed(None))(v => passwords.hash(v).map(Some(_)))
+    email    <- optionalRequired(input.email, "Email")
+    username <- optionalRequired(input.username, "Username")
+    password <- optionalRequired(input.password, "Password")
+    hash     <- password match {
+              case None        => zio.ZIO.succeed(None)
+              case Some(value) => passwords.hash(value).map(Some(_))
+            }
     updated <- db(users.update(principal.id, UserPatch(email, username, hash, input.bio, input.image)))
-    user    <- updated.fold[IO[AppError, UserRecord]](zio.ZIO.fail(AppError.Unauthorized()))(zio.ZIO.succeed(_))
+    user    <- updated match {
+              case Some(value) => zio.ZIO.succeed(value)
+              case None        => zio.ZIO.fail(AppError.Unauthorized())
+            }
   } yield session(user, principal.token)
 
   def profile(viewer: Option[Principal], username: String): IO[AppError, Profile] =
     db(users.profile(
       username,
       viewer.fold(0L)(_.id)
-    )).flatMap(_.fold[IO[AppError, Profile]](zio.ZIO.fail(AppError.NotFound()))(zio.ZIO.succeed(_)))
+    )).flatMap(orNotFound)
 
   def follow(principal: Principal, username: String, following: Boolean): IO[AppError, Profile] = for {
-    target <- db(users.byUsername(username)).flatMap(_.fold[IO[
-                AppError,
-                UserRecord
-              ]](zio.ZIO.fail(AppError.NotFound()))(zio.ZIO.succeed(_)))
+    target <- db(users.byUsername(username)).flatMap(orNotFound)
     _      <- db(users.setFollowing(principal.id, target.id, following))
     result <- db(users.profile(
                 username,
                 principal.id
-              )).flatMap(_.fold[IO[AppError, Profile]](zio.ZIO.fail(AppError.NotFound()))(zio.ZIO.succeed(_)))
+              )).flatMap(orNotFound)
   } yield result
 
   def listArticles(viewer: Option[Principal], filter: ArticleFilter, page: Page): IO[AppError, ArticlePage] =

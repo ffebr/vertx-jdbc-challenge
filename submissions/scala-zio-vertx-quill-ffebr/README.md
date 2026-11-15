@@ -21,6 +21,21 @@ filters, decimal and array parameters, JSON/JSONB, and cursor streams.
 Registry releases must pass the driver's database/Scala CI matrix; the separate
 published-consumer check below verifies the delivered artifacts.
 
+## Read the code
+
+Start at `shared/src/main/scala/conduit/Main.scala`, then follow the request
+through `http/HttpApi.scala`, `service/ConduitService.scala` and the
+`persistence/QuillUserRepository.scala` / `QuillContentRepository.scala` classes.
+The latter uses named article projections: summary rows intentionally omit the
+body, while full rows include it. Backend-specific connection and error handling
+live in `jdbc/` and `native/` versions of `persistence.Database`.
+
+[REVIEW.md](REVIEW.md) records the readability review, changes and acceptance
+results. The [engineering report](https://ffebr.github.io/vertx-jdbc-challenge/)
+is built from `site/` with diagrams, source excerpts, parameter-binding examples
+and CI evidence. See [site/DEPLOYMENT.md](site/DEPLOYMENT.md) for preview and
+GitHub Pages setup.
+
 ## Build and run
 
 Run `install.sh` once on a clean box, then `build.sh` as a normal user.

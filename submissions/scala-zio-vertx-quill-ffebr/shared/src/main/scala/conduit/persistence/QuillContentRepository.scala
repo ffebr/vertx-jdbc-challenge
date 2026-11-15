@@ -33,6 +33,24 @@ final class QuillContentRepository(database: Database) extends ContentRepository
     createdAt: Instant,
     updatedAt: Instant
   )
+  private case class ArticleViewRow(
+    article: ArticleRow,
+    username: String,
+    bio: Option[String],
+    image: Option[String],
+    favoriteCount: Long,
+    favorited: Boolean,
+    following: Boolean
+  )
+  private case class ArticleSummaryViewRow(
+    article: ArticleSummaryRow,
+    username: String,
+    bio: Option[String],
+    image: Option[String],
+    favoriteCount: Long,
+    favorited: Boolean,
+    following: Boolean
+  )
   private case class TagRow(id: Int, name: String)
   private case class ArticleTagRow(articleId: Long, tagId: Int)
   private case class FollowRow(followerId: Long, followeeId: Long)
@@ -44,6 +62,13 @@ final class QuillContentRepository(database: Database) extends ContentRepository
     body: String,
     createdAt: Instant,
     updatedAt: Instant
+  )
+  private case class CommentViewRow(
+    comment: CommentRow,
+    username: String,
+    bio: Option[String],
+    image: Option[String],
+    following: Boolean
   )
   private val articles      = quote(querySchema[ArticleRow]("articles"))
   private val tagsTable     = quote(querySchema[TagRow]("tags"))
@@ -65,7 +90,7 @@ final class QuillContentRepository(database: Database) extends ContentRepository
       val favoriteCount = favorites.filter(_.articleId == a.id).size
       val favorited     = favorites.filter(f => f.articleId == a.id && f.userId == lift(viewerId)).nonEmpty
       val following     = follows.filter(f => f.followerId == lift(viewerId) && f.followeeId == a.authorId).nonEmpty
-      (a, u.username, u.bio, u.image, favoriteCount, favorited, following)
+      ArticleViewRow(a, u.username, u.bio, u.image, favoriteCount, favorited, following)
     }
   }
 
@@ -75,7 +100,7 @@ final class QuillContentRepository(database: Database) extends ContentRepository
       val favoriteCount = favorites.filter(_.articleId == a.id).size
       val favorited     = favorites.filter(f => f.articleId == a.id && f.userId == lift(viewerId)).nonEmpty
       val following     = follows.filter(f => f.followerId == lift(viewerId) && f.followeeId == a.authorId).nonEmpty
-      (summary, u.username, u.bio, u.image, favoriteCount, favorited, following)
+      ArticleSummaryViewRow(summary, u.username, u.bio, u.image, favoriteCount, favorited, following)
     }
   }
 
@@ -89,72 +114,74 @@ final class QuillContentRepository(database: Database) extends ContentRepository
     database.execute(ctx.run(tagQuery).map(_.toList)).map(_.groupMap(_._1)(_._2))
   }
 
-  private type SummaryResult = (ArticleSummaryRow, String, Option[String], Option[String], Long, Boolean, Boolean)
-  private def assembleSummaries(rows: List[SummaryResult]): Task[List[Article]] =
+  private def assembleSummaries(rows: List[ArticleSummaryViewRow]): Task[List[Article]] =
     if (rows.isEmpty) zio.ZIO.succeed(Nil)
-    else loadTags(rows.map(_._1.id)).map { grouped =>
-      rows.map { case (a, username, bio, image, count, favorited, following) =>
+    else loadTags(rows.map(_.article.id)).map { grouped =>
+      rows.map { row =>
+        val article = row.article
         Article(
-          a.id,
-          a.slug,
-          a.title,
-          a.description,
+          article.id,
+          article.slug,
+          article.title,
+          article.description,
           None,
-          grouped.getOrElse(a.id, Nil),
-          a.createdAt,
-          a.updatedAt,
-          favorited,
-          count,
-          Profile(username, bio, image, following)
+          grouped.getOrElse(article.id, Nil),
+          article.createdAt,
+          article.updatedAt,
+          row.favorited,
+          row.favoriteCount,
+          Profile(row.username, row.bio, row.image, row.following)
         )
       }
     }
 
-  private def assemble(rows: List[(ArticleRow, String, Option[String], Option[String], Long, Boolean, Boolean)])
+  private def assemble(rows: List[ArticleViewRow])
     : Task[List[Article]] = {
     if (rows.isEmpty) zio.ZIO.succeed(Nil)
-    else loadTags(rows.map(_._1.id)).map { grouped =>
-      rows.map { case (a, username, bio, image, count, favorited, following) =>
+    else loadTags(rows.map(_.article.id)).map { grouped =>
+      rows.map { row =>
+        val article = row.article
         Article(
-          a.id,
-          a.slug,
-          a.title,
-          a.description,
-          Some(a.body),
-          grouped.getOrElse(a.id, Nil),
-          a.createdAt,
-          a.updatedAt,
-          favorited,
-          count,
-          Profile(username, bio, image, following)
+          article.id,
+          article.slug,
+          article.title,
+          article.description,
+          Some(article.body),
+          grouped.getOrElse(article.id, Nil),
+          article.createdAt,
+          article.updatedAt,
+          row.favorited,
+          row.favoriteCount,
+          Profile(row.username, row.bio, row.image, row.following)
         )
       }
     }
   }
 
-  private def pageRows(viewerId: Long, filter: ArticleFilter, page: Page): Task[List[SummaryResult]] = {
+  private def pageRows(viewerId: Long, filter: ArticleFilter, page: Page): Task[List[ArticleSummaryViewRow]] = {
     val base = articleSummaryBase(viewerId)
     val q    = filter match {
-      case ArticleFilter.All       => quote(base.sortBy(_._1.id)(Ord.desc).drop(lift(page.offset)).take(lift(page.limit)))
+      case ArticleFilter.All =>
+        quote(base.sortBy(_.article.id)(Ord.desc).drop(lift(page.offset)).take(lift(page.limit)))
       case ArticleFilter.Tag(name) =>
         quote(base.filter(r =>
           articleTags.filter(at =>
-            at.articleId == r._1.id &&
+            at.articleId == r.article.id &&
               tagsTable.filter(t => t.id == at.tagId && t.name == lift(name)).nonEmpty
           ).nonEmpty
         )
-          .sortBy(_._1.id)(Ord.desc).drop(lift(page.offset)).take(lift(page.limit)))
+          .sortBy(_.article.id)(Ord.desc).drop(lift(page.offset)).take(lift(page.limit)))
       case ArticleFilter.Author(name) =>
-        quote(base.filter(r => users.filter(u => u.username == lift(name) && u.id == r._1.authorId).nonEmpty)
-          .sortBy(_._1.id)(Ord.desc).drop(lift(page.offset)).take(lift(page.limit)))
+        quote(base.filter(r => users.filter(u => u.username == lift(name) && u.id == r.article.authorId).nonEmpty)
+          .sortBy(_.article.id)(Ord.desc).drop(lift(page.offset)).take(lift(page.limit)))
       case ArticleFilter.Favorited(name) =>
         quote(base.filter(r =>
           favorites.filter(f =>
-            f.articleId == r._1.id &&
+            f.articleId == r.article.id &&
               users.filter(u => u.username == lift(name) && u.id == f.userId).nonEmpty
           ).nonEmpty
         )
-          .sortBy(_._1.id)(Ord.desc).drop(lift(page.offset)).take(lift(page.limit)))
+          .sortBy(_.article.id)(Ord.desc).drop(lift(page.offset)).take(lift(page.limit)))
     }
     database.execute(ctx.run(q).map(_.toList))
   }
@@ -192,9 +219,9 @@ final class QuillContentRepository(database: Database) extends ContentRepository
 
   def feed(viewerId: Long, page: Page): Task[ArticlePage] = {
     val query = quote(articleSummaryBase(viewerId).filter(r =>
-      follows.filter(f => f.followerId == lift(viewerId) && f.followeeId == r._1.authorId).nonEmpty
+      follows.filter(f => f.followerId == lift(viewerId) && f.followeeId == r.article.authorId).nonEmpty
     )
-      .sortBy(_._1.id)(Ord.desc).drop(lift(page.offset)).take(lift(page.limit)))
+      .sortBy(_.article.id)(Ord.desc).drop(lift(page.offset)).take(lift(page.limit)))
     for {
       rows   <- database.execute(ctx.run(query).map(_.toList))
       result <- assembleSummaries(rows)
@@ -206,8 +233,8 @@ final class QuillContentRepository(database: Database) extends ContentRepository
 
   private def one(id: Long, slug: Option[String], viewerId: Long): Task[Option[Article]] = {
     val query = slug match {
-      case Some(value) => quote(articleBase(viewerId).filter(r => r._1.slug == lift(value)).take(1))
-      case None        => quote(articleBase(viewerId).filter(r => r._1.id == lift(id)).take(1))
+      case Some(value) => quote(articleBase(viewerId).filter(r => r.article.slug == lift(value)).take(1))
+      case None        => quote(articleBase(viewerId).filter(r => r.article.id == lift(id)).take(1))
     }
     database.execute(ctx.run(query).map(_.toList)).flatMap(rows => assemble(rows).map(_.headOption))
   }
@@ -275,14 +302,22 @@ final class QuillContentRepository(database: Database) extends ContentRepository
       .filter(_._1.articleId == lift(articleId)).sortBy(x => (x._1.createdAt, x._1.id))(Ord.desc).take(100)
       .map { case (c, u) =>
         val following = follows.filter(f => f.followerId == lift(viewerId) && f.followeeId == c.authorId).nonEmpty
-        (c, u.username, u.bio, u.image, following)
+        CommentViewRow(c, u.username, u.bio, u.image, following)
       })
 
+  private def toComment(row: CommentViewRow): Comment = {
+    val comment = row.comment
+    Comment(
+      comment.id,
+      comment.createdAt,
+      comment.updatedAt,
+      comment.body,
+      Profile(row.username, row.bio, row.image, row.following)
+    )
+  }
+
   def comments(articleId: Long, viewerId: Long): Task[List[Comment]] =
-    database.execute(ctx.run(commentQuery(articleId, viewerId)).map(_.toList.map {
-      case (c, name, bio, image, following) =>
-        Comment(c.id, c.createdAt, c.updatedAt, c.body, Profile(name, bio, image, following))
-    }))
+    database.execute(ctx.run(commentQuery(articleId, viewerId)).map(_.toList.map(toComment)))
 
   def createComment(articleId: Long, authorId: Long, body: String): Task[Comment] = database.execute(ctx.transaction {
     val insert = quote(commentsTable.insert(
@@ -293,14 +328,10 @@ final class QuillContentRepository(database: Database) extends ContentRepository
     for {
       id  <- ctx.run(insert)
       row <- ctx.run(quote(commentsTable.join(users).on((c, u) => c.authorId == u.id)
-               .filter(_._1.id == lift(id)).map { case (c, u) => (c, u.username, u.bio, u.image) })).map(_.head)
-    } yield Comment(
-      row._1.id,
-      row._1.createdAt,
-      row._1.updatedAt,
-      row._1.body,
-      Profile(row._2, row._3, row._4, following = false)
-    )
+               .filter(_._1.id == lift(id)).map { case (c, u) =>
+                 CommentViewRow(c, u.username, u.bio, u.image, false)
+               })).map(_.head)
+    } yield toComment(row)
   })
 
   def commentAuthor(articleId: Long, commentId: Long): Task[Option[Long]] =
