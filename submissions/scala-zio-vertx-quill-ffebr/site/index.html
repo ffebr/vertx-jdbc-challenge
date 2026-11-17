@@ -1,726 +1,143 @@
 <!doctype html>
 <html lang="ru">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#f4f1e9" />
-    <meta
-      name="description"
-      content="Инженерный разбор: общий Quill QDSL, ZIO и два исполнителя SQL — JDBC и native Vert.x."
-    />
-    <title>Quill × ZIO × Vert.x — инженерный разбор</title>
-    <link rel="stylesheet" href="assets/style.css" />
-    <script src="assets/report.js" defer></script>
-  </head>
-  <body>
-    <a class="skip" href="#main">Перейти к докладу</a>
-    <header class="masthead">
-      <a class="wordmark" href="#top" aria-label="К началу доклада"
-        >QUILL <span>· ENGINEERING</span>
-      </a>
-      <span class="edition">АРХИТЕКТУРНЫЙ РАЗБОР <i> / </i> 01</span>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f3f2eb">
+  <meta name="description" content="Что происходит между Quill и PostgreSQL: потоки JDBC, сокеты Vert.x, event loop и ZIO fibers.">
+  <title>JDBC и Vert.x под капотом — Quill, ZIO и PostgreSQL</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <script src="assets/report.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">К докладу</a>
+  <header class="site-header">
+    <a class="brand" href="#main">Quill / Vert.x</a>
+    <nav aria-label="Разделы доклада">
+      <a href="#execution">Потоки</a>
+      <a href="#event-loop">Event loop</a>
+      <a href="#quill">Quill и ZIO</a>
+      <a href="#performance">Нагрузка</a>
+      <a href="#integration">Подключение</a>
+    </nav>
+  </header>
+
+  <main id="main">
+    <header class="hero">
+      <p class="eyebrow">PostgreSQL · Vert.x SQL Client · ZIO</p>
+      <h1>Кто ждёт ответа<br>от PostgreSQL?</h1>
+      <p class="lead">Quill генерирует SQL в обеих сборках. В JDBC поток остаётся занят, пока синхронный вызов ждёт ответ. Vert.x регистрирует ожидание в event loop, а ZIO приостанавливает fiber. При большом числе запросов в полёте это меняет расход потоков приложения.</p>
+      <a class="hero-link" href="#execution">Проследить два запроса <span aria-hidden="true">↓</span></a>
     </header>
-    <div class="page-grid" id="top">
-      <aside class="rail" aria-label="Навигация по разделам">
-        <div class="rail-label">СОДЕРЖАНИЕ</div>
-        <nav>
-          <a href="#overview">00 <span>Идея</span> </a>
-          <a href="#architecture">01 <span>Архитектура</span> </a>
-          <a href="#queries">02 <span>Запросы</span> </a>
-          <a href="#async">03 <span>Асинхронность</span> </a>
-          <a href="#bindings">04 <span>Параметры</span> </a>
-          <a href="#resources">05 <span>Ресурсы</span> </a>
-          <a href="#integration">06 <span>Интеграция</span> </a>
-          <a href="#review">07 <span>Ревью</span> </a>
-          <a href="#evidence">08 <span>Проверки</span> </a>
-          <a href="#limits">09 <span>Границы</span> </a>
-        </nav>
-        <div class="rail-note">ЧТЕНИЕ<br />~ 12 МИН</div>
-      </aside>
-      <main id="main">
-        <section class="hero">
-          <div class="kicker">
-            <span class="dot"> </span> СИСТЕМНЫЙ ДИЗАЙН · SCALA · DATA
+
+    <section id="execution" aria-labelledby="execution-title">
+      <div class="section-heading">
+        <h2 id="execution-title">Два запроса, два соединения</h2>
+        <p>В обеих схемах A и B отправлены по разным соединениям. Для примера ответ B приходит первым. Столбцы показывают порядок событий, без масштаба времени.</p>
+      </div>
+      <figure class="trace">
+        <div class="trace-controls" id="trace-controls" role="group" aria-label="Шаг схемы" hidden>
+          <button type="button" data-step="1" aria-pressed="false">Отправка</button>
+          <button type="button" data-step="2" aria-pressed="true">Ожидание</button>
+          <button type="button" data-step="3" aria-pressed="false">Ответ B</button>
+          <button type="button" data-step="4" aria-pressed="false">Ответ A</button>
+        </div>
+        <div class="trace-grid">
+          <div class="trace-panel">
+            <h3>JDBC <span>два рабочих потока</span></h3>
+            <table>
+              <thead><tr><th scope="col">Поток</th><th scope="col" data-phase="1">Отправка</th><th scope="col" data-phase="2">Ожидание</th><th scope="col" data-phase="3">Ответ B</th><th scope="col" data-phase="4">Ответ A</th></tr></thead>
+              <tbody>
+                <tr><th scope="row">A</th><td data-phase="1">Пишет SQL</td><td class="waiting" data-phase="2">Ждёт A</td><td class="waiting" data-phase="3">Ждёт A</td><td class="work" data-phase="4">Читает A</td></tr>
+                <tr><th scope="row">B</th><td data-phase="1">Пишет SQL</td><td class="waiting" data-phase="2">Ждёт B</td><td class="work" data-phase="3">Читает B</td><td data-phase="4">Свободен</td></tr>
+              </tbody>
+            </table>
           </div>
-          <h1>
-            Quill-запросы.<br />
-            <em>Два способа</em>
-            <br />исполнить SQL.
-          </h1>
-          <p class="dek">
-            Как сохранить общий слой запросов на Scala, заменив
-            JDBC-синхронность на native SQL-клиент Vert.x — и где проходит
-            реальная граница этой миграции.
-          </p>
-          <div class="hero-meta">
-            <span>CONDUIT / ENGINEERING NOTE</span>
-            <span>ALPHA 2 · 14 НОЯБРЯ 2026</span>
+          <div class="trace-panel">
+            <h3>Vert.x <span>один event loop в примере</span></h3>
+            <table>
+              <thead><tr><th scope="col">Кто</th><th scope="col" data-phase="1">Отправка</th><th scope="col" data-phase="2">Ожидание</th><th scope="col" data-phase="3">Ответ B</th><th scope="col" data-phase="4">Ответ A</th></tr></thead>
+              <tbody>
+                <tr><th scope="row">Event loop</th><td class="work" data-phase="1">Пишет A, B</td><td data-phase="2">Другие события</td><td class="work" data-phase="3">Читает B</td><td class="work" data-phase="4">Читает A</td></tr>
+                <tr><th scope="row">Fibers</th><td data-phase="1">Запускают SQL</td><td class="waiting" data-phase="2">Пауза A, B</td><td data-phase="3">B готова к запуску</td><td data-phase="4">A готова к запуску</td></tr>
+              </tbody>
+            </table>
           </div>
-          <div
-            class="hero-art"
-            role="img"
-            aria-label="Схема: общее описание запроса разветвляется на JDBC и native Vert.x исполнители, оба обращаются к одной базе данных"
-          >
-            <div class="art-core">
-              <small>ОДИН ИСТОЧНИК</small>
-              <strong>Quill QDSL</strong>
-              <span>query · filter · map</span>
-            </div>
-            <div class="art-branch">
-              <span> </span>
-              <span> </span>
-            </div>
-            <div class="art-node jdbc">
-              <small>EXECUTOR A</small>
-              <b>JDBC</b>
-              <span>HikariCP · DataSource</span>
-            </div>
-            <div class="art-node native">
-              <small>EXECUTOR B</small>
-              <b>Vert.x native</b>
-              <span>Pool · Tuple · Row</span>
-            </div>
-            <div class="art-db">
-              <b>▤</b>
-              <span>ОБЩАЯ БАЗА · PostgreSQL</span>
-            </div>
-            <div class="art-caption">
-              ОДИН QDSL <i>→</i> ДВА КОМПИЛИРУЕМЫХ ПРИЛОЖЕНИЯ
-            </div>
-          </div>
-        </section>
-        <section class="chapter" id="overview">
-          <div class="chapter-no">00 / ТЕЗИС</div>
-          <div class="chapter-body">
-            <h2>Меняется исполнитель,<br />а не язык запросов.</h2>
-            <p class="lead">
-              Quill quotation описывает выборку и преобразование данных. JDBC
-              или native Vert.x определяют, каким способом SQL уйдёт в базу и
-              как вернутся строки.
-            </p>
-            <p>
-              В Conduit общий код приложения компилируется в двух вариантах.
-              Репозитории и сервисы общие; различается небольшая граница
-              подключения: контекст, пул, кодеки, предоставление эффекта и
-              перевод ошибок. Это позволяет сравнить два пути исполнения на
-              одном API и одной схеме.
-            </p>
-            <p>
-              Native-реализация не является JDBC-драйвером и не эмулирует
-              произвольные вызовы <code>java.sql</code>. Это исполнитель Quill
-              на Vert.x SQL Client: quotations перекомпилируются, JDBC-зависимые
-              кодеки адаптируются.
-            </p>
-            <div class="callout">
-              <span class="callout-mark">↳</span>
-              <div>
-                <b>Рабочая гипотеза</b>
-                <p>
-                  Если запрос выражен QDSL и его кодеки не привязаны к JDBC,
-                  транспорт можно заменить в адаптере persistence, сохранив
-                  бизнес-логику.
-                </p>
-              </div>
-            </div>
-          </div>
-        </section>
-        <section class="chapter" id="architecture">
-          <div class="chapter-no">01 / КОМПОНОВКА</div>
-          <div class="chapter-body">
-            <h2>Общий код,<br />разные окружения.</h2>
-            <p>
-              Tapir HTTP, ZIO-сервисы, модели, DTO и Quill-репозитории находятся
-              в <code>shared</code>. Два проекта подключают эти исходники и
-              собирают собственный <code>persistence.Database</code> с разными
-              зависимостями. Во время запуска <code>Main</code> выбирает уже
-              собранный вариант; отдельный endpoint не выбирает JDBC или native
-              на лету.
-            </p>
-            <div
-              class="diagram"
-              role="img"
-              aria-label="Слои приложения: HTTP, сервисы и общие Quill-репозитории разветвляются к JDBC и native Vert.x"
-            >
-              <div class="diagram-row">
-                <span class="layer">HTTP · Tapir / Vert.x</span>
-                <span class="arrow">↓</span>
-                <span class="layer">Сервисы · ZIO</span>
-                <span class="arrow">↓</span>
-                <span class="layer shared">ОБЩИЕ Quill-репозитории</span>
-              </div>
-              <div class="fork">
-                <div>
-                  <b>jdbc</b>
-                  <span>Database</span>
-                  <span>DataSource</span>
-                  <span>HikariCP · максимум 16</span>
-                </div>
-                <div>
-                  <b>native</b>
-                  <span>Database</span>
-                  <span>Vert.x Pool</span>
-                  <span>native client · максимум 16</span>
-                </div>
-              </div>
-              <div class="database">
-                ОДНА СХЕМА POSTGRESQL · ДВА ПУТИ ИСПОЛНЕНИЯ
-              </div>
-              <p class="figure-caption">
-                СХЕМА 01 · Сборки независимы; репозитории синхронизировать
-                вручную не нужно.
-              </p>
-            </div>
-            <div class="code-label">
-              ДВА ВАРИАНТА ЗАВИСЯТ ОТ ОБЩЕГО ИНТЕРФЕЙСА
-            </div>
-            <details class="howto">
-              <summary>Открыть реализацию адаптеров Database</summary>
-              <div>
-                <pre
-                  tabindex="0"
-                  aria-label="Прокручиваемый фрагмент кода"
-                ><code>{{JDBC_DATABASE}}</code></pre>
-                <pre
-                  tabindex="0"
-                  aria-label="Прокручиваемый фрагмент кода"
-                ><code>{{NATIVE_DATABASE}}</code></pre>
-              </div>
-            </details>
-            <p>
-              Обе фабрики живут в application scope. JDBC использует HikariCP
-              7.1.0 поверх PostgreSQL JDBC driver; native-путь использует Vert.x
-              <code>Pool</code> и native PostgreSQL client. У обоих задан
-              максимум 16 соединений, но это не делает их производительность или
-              внутреннюю конфигурацию эквивалентными.
-            </p>
-          </div>
-        </section>
-        <section class="chapter" id="queries">
-          <div class="chapter-no">02 / QDSL</div>
-          <div class="chapter-body">
-            <h2>Запросы остаются<br />выразимыми в Scala.</h2>
-            <p>
-              В статических quotations SQL строится Quill при компиляции;
-              динамически формируемые части могут вычисляться во время
-              исполнения. <code>lift</code> передаёт значение через encoder как
-              параметр, а не склеивает его с SQL-строкой.
-            </p>
-            <div class="code-label">
-              СВОДНАЯ ПРОЕКЦИЯ · QuillContentRepository.articleSummaryBase
-            </div>
-            <pre
-              tabindex="0"
-              aria-label="Прокручиваемый фрагмент кода"
-            ><code>{{QDSL_SUMMARY}}</code></pre>
-            <p>
-              При исполнении quotation кодек формирует Vert.x
-              <code>Tuple</code>, SQL отправляется prepared query, а
-              <code>Row</code> декодируется в доменную модель. На уровне QDSL
-              репозиторий не знает, перед ним <code>PreparedStatement</code> или
-              native client.
-            </p>
-            <h3>Не игрушечный select</h3>
-            <p>
-              Сводка статьи соединяет автора, вычисляет число избранного и флаги
-              подписки через SQL-агрегат и correlated <code>exists</code>. Это
-              серверная работа, а не цикл Scala с дополнительным запросом на
-              каждую статью.
-            </p>
-            <div class="code-label">ЛЕНТА · QuillContentRepository.feed</div>
-            <pre
-              tabindex="0"
-              aria-label="Прокручиваемый фрагмент кода"
-            ><code>{{QDSL_FEED}}</code></pre>
-            <p>
-              Базовая проекция намеренно не включает <code>body</code>; полная
-              статья получает его отдельно. Теги загружаются одним общим
-              запросом по id страницы. Ветви ленты фильтруют по тегу, автору,
-              избранному или подпискам, затем задают сортировку и границы
-              страницы.
-            </p>
-            <div class="code-label">
-              ИМЕНОВАННЫЕ ПРОЕКЦИИ УПРОЩАЮТ ДЕКОДИРОВАНИЕ
-            </div>
-            <pre
-              tabindex="0"
-              aria-label="Прокручиваемый фрагмент кода"
-            ><code>{{NAMED_PROJECTIONS}}</code></pre>
-            <div class="note">
-              <b>Семантика приложения</b>
-              <span
-                >Счётчики списков ограничены <code>take(1000)</code>: после
-                порога это не точное общее число. Native-драйвер сохраняет
-                поведение запроса, но не меняет это продуктовое решение.</span
-              >
-            </div>
-            <div class="interactive" aria-labelledby="binding-title">
-              <div>
-                <div class="eyebrow">МИНИ-ЭКСПЕРИМЕНТ</div>
-                <h3 id="binding-title">Что означает <code>None</code>?</h3>
-                <p>
-                  Выберите вход и сравните концептуальные параметры. Это схема
-                  binding, не запрос к базе.
-                </p>
-              </div>
-              <label class="switch-label" for="option-toggle">
-                <input id="option-toggle" type="checkbox" />
-                <span class="switch"> </span>
-                <span id="option-state">None</span>
-              </label>
-              <div class="binding-output">
-                <div>
-                  <small>QDSL</small>
-                  <code id="binding-source">lift(None).getOrElse(column)</code>
-                </div>
-                <div>
-                  <small>ПАРАМЕТРЫ</small>
-                  <code id="binding-value">$1 = NULL · $2 = NULL</code>
-                </div>
-                <div>
-                  <small>ТИПЫ</small>
-                  <code id="binding-type">$1 = text · $2 = text</code>
-                </div>
-              </div>
-              <div class="binding-sql">
-                <div>
-                  <small>ИСХОДНАЯ ФОРМА CASE</small>
-                  <code>CASE WHEN $1 IS NOT NULL THEN $2 ELSE email END</code>
-                </div>
-                <div class="resolved">
-                  <small>ФОРМА С ТИПИЗИРОВАННЫМ NULL</small>
-                  <code
-                    >CASE WHEN ($1)::text IS NOT NULL THEN $2 ELSE email
-                    END</code
-                  >
-                </div>
-              </div>
-              <p class="binding-result" id="binding-result">
-                Ожидаемое значение email: текущее значение сохранится.
-              </p>
-              <p class="interactive-foot">
-                Схематичная иллюстрация параметров и SQL, не запрос к базе. Для
-                optional update <code>None</code> сохраняет поле; это не команда
-                очистки в SQL NULL.
-              </p>
-            </div>
-          </div>
-        </section>
-        <section class="chapter" id="async">
-          <div class="chapter-no">03 / ВЫПОЛНЕНИЕ</div>
-          <div class="chapter-body">
-            <h2>Future возвращается<br />в ZIO fiber.</h2>
-            <p>
-              Vert.x SQL Client работает асинхронно: после отправки запроса ZIO
-              fiber ожидает callback через <code>ZIO.async</code>, не удерживая
-              поток на синхронном SQL-вызове. При завершении ошибки или
-              результата fiber продолжается и выполняет декодирование.
-            </p>
-            <div
-              class="timeline"
-              role="img"
-              aria-label="Последовательность асинхронного запроса: fiber отправляет запрос, приостанавливается; Vert.x обслуживает сеть, PostgreSQL отвечает; callback возобновляет fiber"
-            >
-              <div>
-                <b>01</b>
-                <span>fiber</span>
-                <small>preparedQuery<br />(sql, tuple)</small>
-              </div>
-              <i>→</i>
-              <div class="wait">
-                <b>02</b>
-                <span>ожидание</span>
-                <small>fiber приостановлена<br />на async</small>
-              </div>
-              <i>→</i>
-              <div>
-                <b>03</b>
-                <span>Vert.x</span>
-                <small>event loop<br />сеть / callback</small>
-              </div>
-              <i>→</i>
-              <div>
-                <b>04</b>
-                <span>PostgreSQL</span>
-                <small>результат<br />или ошибка</small>
-              </div>
-            </div>
-            <p class="figure-caption">
-              СХЕМА 02 · Асинхронный ввод-вывод освобождает поток ожидания;
-              вычисления CPU остаются.
-            </p>
-            <h3>Асинхронность не означает «бесплатно»</h3>
-            <p>
-              Драйвер не выполняет native SQL через
-              <code>attemptBlocking</code>: получение соединения, запросы и
-              cursor идут через callbacks. Но сериализация, подготовка Tuple,
-              декодирование и JSON занимают CPU.
-            </p>
-            <p>
-              Отдельный пример — bcrypt cost 10 через
-              <code>at.favre.lib:bcrypt:0.10.2</code>. Его синхронные
-              hash/verify обёрнуты в <code>ZIO.attemptBlocking</code> при
-              регистрации, входе и смене пароля. Это защищает обычный executor
-              от долгой операции, но не делает вычисление дешевле и не
-              ограничивает конкуренцию. Отдельного ограниченного CPU executor
-              пока нет. Обычный авторизованный запрос проверяет JWT и не
-              пересчитывает bcrypt.
-            </p>
-            <p class="muted">
-              JDBC по-прежнему имеет синхронный контракт: Hikari управляет
-              соединениями, а не превращает ожидание JDBC в async API. Здесь нет
-              измерений, доказывающих преимущество по скорости.
-            </p>
-          </div>
-        </section>
-        <section class="chapter" id="bindings">
-          <div class="chapter-no">04 / ТИПЫ SQL</div>
-          <div class="chapter-body">
-            <h2>NULL должен<br />иметь тип.</h2>
-            <p>
-              PostgreSQL разбирает не только текст SQL, но и тип каждого
-              параметра. В условии
-              <code>CASE WHEN $1 IS NOT NULL THEN $2 ELSE email END</code>
-              сервер не всегда может вывести тип <code>$1</code>. В native
-              prepare это приводило к
-              <code>42P18: indeterminate datatype</code> для optional update,
-              <code>isEmpty</code> и <code>forall</code>.
-            </p>
-            <div class="sql-compare">
-              <div>
-                <small>БЕЗ ИНФОРМАЦИИ О ТИПЕ</small>
-                <code>CASE WHEN $1 IS NOT NULL THEN $2 ELSE email END</code>
-                <span>Параметр-проверка не связан со столбцом</span>
-              </div>
-              <div class="resolved">
-                <small>ТИПИЗИРОВАННЫЙ NULL</small>
-                <code
-                  >CASE WHEN ($1)::text IS NOT NULL THEN $2 ELSE email END</code
-                >
-                <span>Смысл CASE прежний; тип известен серверу</span>
-              </div>
-            </div>
-            <p>
-              В alpha.2 кодек сохраняет тип SQL NULL, включая
-              <code>Option</code> и <code>MappedEncoding</code>. PostgreSQL
-              binding-слой добавляет cast там, где тип нельзя вывести. Decimal
-              получает <code>numeric</code>; массивы сохраняют array type; JSON
-              и JSONB передаются как JSON-текст с приведением к типу столбца.
-            </p>
-            <p>
-              Скалярные сравнения не приводятся огульно к <code>text</code>: это
-              могло бы сломать сравнение с PostgreSQL enum. JSON
-              <code>null</code>, SQL NULL и строка JSON
-              <code>"null"</code> остаются разными значениями. Тексты параметров
-              сканируются с учётом кавычек, комментариев и dollar-quoted блоков.
-            </p>
-            <div class="code-label">
-              OPTIONAL UPDATE · QuillUserRepository.update
-            </div>
-            <pre
-              tabindex="0"
-              aria-label="Фрагмент кода: optional update Quill"
-            ><code>{{USER_UPDATE}}</code></pre>
-            <div class="callout">
-              <span class="callout-mark">!</span>
-              <div>
-                <b>Граница ответственности</b>
-                <p>
-                  Это PostgreSQL binding fix; один общий SQL rewrite без учёта
-                  типа параметра был бы источником новых несовместимостей.
-                </p>
-              </div>
-            </div>
-          </div>
-        </section>
-        <section class="chapter" id="resources">
-          <div class="chapter-no">05 / ВРЕМЯ ЖИЗНИ</div>
-          <div class="chapter-body">
-            <h2>Соединение принадлежит<br />scope и fiber.</h2>
-            <p>
-              В native-транзакции контекст заимствует соединение, начинает
-              транзакцию и кладёт его в <code>FiberRef</code>. Вложенные
-              <code>ctx.run</code> используют ту же связь. Успех приводит к
-              commit, ошибка или interruption — к rollback и освобождению
-              соединения.
-            </p>
-            <div class="resource-cards">
-              <div>
-                <b>01 / ОТКРЫТЬ</b>
-                <p>Scoped acquire получает connection из Pool.</p>
-              </div>
-              <div>
-                <b>02 / ПЕРЕДАТЬ</b>
-                <p>FiberRef даёт вложенным действиям текущую транзакцию.</p>
-              </div>
-              <div>
-                <b>03 / ЗАВЕРШИТЬ</b>
-                <p>Commit или rollback; затем release при любом выходе.</p>
-              </div>
-            </div>
-            <p>
-              Вложенный <code>ctx.transaction</code> переиспользует транзакцию и
-              не создаёт savepoint. Отдельный трудный случай — interruption до
-              callback acquire: соединение может прийти уже после отмены fiber.
-              Runtime регистрирует владение в scope и закрывает позднее
-              полученный ресурс.
-            </p>
-            <h3>Поток и отмена</h3>
-            <p>
-              <code>ctx.stream</code> использует cursor с настраиваемым fetch
-              size (по умолчанию 128); следующее чтение запрашивается по мере
-              потребления ZStream. Если потребитель соберёт весь поток в
-              коллекцию, его память всё равно растёт. При interruption
-              PostgreSQL-путь отправляет <code>cancelRequest</code>, но сервер
-              мог уже выполнить побочные эффекты. MySQL/MariaDB и DB2 прерывают
-              соответствующее соединение.
-            </p>
-          </div>
-        </section>
-        <section class="chapter" id="integration">
-          <div class="chapter-no">06 / МИГРАЦИЯ</div>
-          <div class="chapter-body">
-            <h2>Начинать с границы<br />подключения.</h2>
-            <p>
-              Практический перенос не требует сначала переписывать сервисы.
-              Нужны отдельные сборки или точка компиляции, где выбираются
-              контекст и зависимости; общий адаптер <code>Database</code> выдаёт
-              репозиториям <code>Task[A]</code> и переводит ошибки persistence в
-              ошибки приложения.
-            </p>
-            <div class="steps">
-              <div>
-                <b>01</b>
-                <span
-                  >Зафиксировать JDBC-поведение интеграционными тестами.</span
-                >
-              </div>
-              <div>
-                <b>02</b>
-                <span
-                  >Выделить фабрику контекста, пула, окружения и маппинга
-                  ошибок.</span
-                >
-              </div>
-              <div>
-                <b>03</b>
-                <span
-                  >Подключить Vert.x Pool и перекомпилировать quotations.</span
-                >
-              </div>
-              <div>
-                <b>04</b>
-                <span
-                  >Перенести кодеки, использующие <code>setObject</code>,
-                  <code>getObject</code> или vendor unwrap.</span
-                >
-              </div>
-              <div>
-                <b>05</b>
-                <span
-                  >Сравнить те же сценарии, включая None/Some, rollback, stream
-                  и interruption.</span
-                >
-              </div>
-              <div>
-                <b>06</b>
-                <span
-                  >Измерить нагрузку и настроить таймауты, пул и
-                  эксплуатационные метрики.</span
-                >
-              </div>
-            </div>
-            <details class="howto">
-              <summary>Минимальная зависимость и consumer-проверка</summary>
-              <div>
-                <pre
-                  tabindex="0"
-                  aria-label="Прокручиваемый фрагмент кода"
-                ><code>resolvers += "ffebr Quill Vert.x" at "https://maven.pkg.github.com/ffebr/zio-quill-vertx"&#10;libraryDependencies += "io.github.ffebr" %% "quill-vertx-zio" % "0.1.0-alpha.2"&#10;credentials += Credentials("GitHub Package Registry", "maven.pkg.github.com",&#10;  sys.env("GITHUB_PACKAGES_USER"), sys.env("GITHUB_PACKAGES_TOKEN"))</code></pre>
-                <pre
-                  tabindex="0"
-                  aria-label="Прокручиваемый фрагмент кода"
-                ><code>./dev/sbt.sh -Dconduit.quill.published.version=0.1.0-alpha.2 &#92;&#10;  jdbc/test native/test jdbc/stage native/stage</code></pre>
-                <p>
-                  GitHub Packages требует учётные данные с доступом к registry.
-                  Не добавляйте секреты в build-файл или репозиторий. Published
-                  consumer workflow проверяет именно скачанные артефакты.
-                </p>
-              </div>
-            </details>
-            <p>
-              Кодеки Quill, привязанные к JDBC API, придётся адаптировать к
-              native <code>Tuple</code> и <code>Row</code>. При этом логические
-              <code>MappedEncoding</code>, например <code>UserId ↔ Long</code>,
-              могут остаться применимыми при наличии scalar-кодека.
-            </p>
-            <p>
-              В демонстрации есть маленькие PostgreSQL <code>infix</code> для
-              <code>nextval(...)</code> и <code>now()</code>: перенос QDSL не
-              переносит автоматически SQL-семантику на любую СУБД.
-            </p>
-          </div>
-        </section>
-        <section class="chapter" id="review">
-          <div class="chapter-no">07 / ИНЖЕНЕРНЫЙ ВЫВОД</div>
-          <div class="chapter-body">
-            <h2>Что команда<br />получает — и что нет.</h2>
-            <p>
-              Рефакторинг читаемости тоже влияет на поддержку: прежде результат
-              сводного запроса собирался в семиэлементный tuple. Теперь форма
-              результата названа типом, а валидация обязательных полей вынесена
-              в общие helpers сервиса. Это делает структуру результата видимой
-              при чтении кода и снижает шанс перепутать соседние поля.
-            </p>
-            <div class="code-label">ДО / ПОСЛЕ · ТИП И ПРОВЕРКА ПОЛЕЙ</div>
-            <pre
-              tabindex="0"
-              aria-label="Прокручиваемый фрагмент кода"
-            ><code>{{NAMED_PROJECTIONS}}</code></pre>
-            <pre
-              tabindex="0"
-              aria-label="Прокручиваемый фрагмент кода"
-            ><code>{{SERVICE_VALIDATION}}</code></pre>
-            <div class="review-grid">
-              <div class="review-good">
-                <h3>Сильные свойства</h3>
-                <ul>
-                  <li>Общий QDSL компилируется для двух исполнителей.</li>
-                  <li>Native SQL имеет асинхронный сетевой контракт Vert.x.</li>
-                  <li>DB lifecycle и ошибка SQL локализованы в адаптере.</li>
-                  <li>
-                    Проверены типизированные NULL, streaming и транзакционный
-                    scope.
-                  </li>
-                </ul>
-              </div>
-              <div class="review-watch">
-                <h3>Требует решения</h3>
-                <ul>
-                  <li>Bcrypt требует контроля параллелизма.</li>
-                  <li>Нет savepoint-семантики вложенных транзакций.</li>
-                  <li>Отмена запроса не гарантирует undo побочного эффекта.</li>
-                  <li>
-                    Пулы с одинаковым max требуют отдельных tuning-решений.
-                  </li>
-                </ul>
-              </div>
-            </div>
-            <p>
-              Это архитектурная демонстрация и alpha/pilot публикация. Её вывод
-              — миграция может быть локализована, если запросы уже выражены
-              Quill DSL и прикладные кодеки отделимы от JDBC. Это не утверждение
-              о полной drop-in совместимости с закрытым приложением или любым
-              JDBC-кодом.
-            </p>
-          </div>
-        </section>
-        <section class="chapter" id="evidence">
-          <div class="chapter-no">08 / СВИДЕТЕЛЬСТВА</div>
-          <div class="chapter-body">
-            <h2>Проверено на<br />общем контракте.</h2>
-            <p>
-              Релизный набор драйвера прошёл PostgreSQL: 197 тестов на каждой из
-              двух версий Scala; MySQL и MariaDB — по 21 тесту на каждой версии;
-              Все восемь заданий релизной матрицы (4 СУБД × 2 версии Scala)
-              прошли успешно; DB2 представлен двумя заданиями. В
-              challenge-приложении исходные API-тесты дают 197/197 для каждого
-              исполнителя, а нормализованные ответы совпали с golden.
-            </p>
-            <div class="evidence-strip">
-              <div>
-                <b>14 / 16</b>
-                <span>unit JDBC / native</span>
-              </div>
-              <div>
-                <b>197 / 197</b>
-                <span>API для каждого</span>
-              </div>
-              <div>
-                <b>8 / 8</b>
-                <span>релизная матрица</span>
-              </div>
-              <div>
-                <b>19</b>
-                <span>регрессий binding</span>
-              </div>
-            </div>
-            <div class="build-status">
-              <span class="status-light"> </span>
-              <div>
-                <b>СТАТУС ЭТОЙ СБОРКИ</b>
-                <p>{{BUILD_STATUS}}</p>
-              </div>
-            </div>
-            <p>
-              Отдельная проверка consumer скачала опубликованные пакеты из
-              registry, собрала и проверила приложение. Это сильнее сборки
-              против соседнего исходного проекта: она проверяет артефакты,
-              которые получит потребитель.
-            </p>
-            <div class="links">
-              <a
-                href="https://github.com/ffebr/zio-quill-vertx/releases/tag/vertx-v0.1.0-alpha.2"
-                >Релиз alpha.2 ↗</a
-              >
-              <a
-                href="https://github.com/ffebr/zio-quill-vertx/actions/runs/43613000269"
-                >Release CI драйвера ↗</a
-              >
-              <a href="{{VALIDATION_URL}}">Проверка приложения ↗</a>
-              <a
-                href="https://github.com/ffebr/zio-quill-vertx/actions/runs/43614128553"
-                >Consumer с опубликованными пакетами ↗</a
-              >
-              <a
-                href="https://github.com/ffebr/vertx-jdbc-challenge/blob/{{APP_COMMIT}}/submissions/scala-zio-vertx-quill-ffebr/shared/src/main/scala/conduit/persistence/QuillContentRepository.scala"
-                >Исходники репозитория ↗</a
-              >
-            </div>
-            <p class="small">
-              Ревизия приложения: <code>{{APP_COMMIT}}</code> · драйвера:
-              <code>{{DRIVER_COMMIT}}</code>
-            </p>
-          </div>
-        </section>
-        <section class="chapter" id="limits">
-          <div class="chapter-no">09 / ЧЕСТНЫЕ ГРАНИЦЫ</div>
-          <div class="chapter-body">
-            <h2>Поддержка — это<br />конкретный список.</h2>
-            <p>
-              Проверены PostgreSQL, MySQL, MariaDB и DB2. Oracle и SQL Server не
-              входят в заявленную матрицу. Для MySQL/MariaDB
-              <code>returning</code> ограничен одним автоматически
-              сгенерированным ключом; одинаковые SQL-возможности всех серверов
-              не обещаются.
-            </p>
-            <p>
-              Опубликованная версия — <code>0.1.0-alpha.2</code>, доступ к
-              GitHub Packages требует аутентификации. Это пилот, пригодный для
-              оценки и контролируемого внедрения, а не готовая замена любого
-              JDBC-драйвера.
-            </p>
-            <h3>Следующие вопросы для production-пилота</h3>
-            <p>
-              Проверить свои quotations и кодеки; задать лимиты bcrypt;
-              согласовать таймауты и pool sizing; измерить latency и throughput
-              под реалистичной конкуренцией; проверить rollback, отмену и
-              частичные эффекты. Никаких выводов о скорости без такого бенчмарка
-              здесь нет.
-            </p>
-            <div class="closing">
-              Разделить описание запроса и его исполнение — небольшой
-              архитектурный шов. Ценность шва определяется не обещанием
-              «асинхронности», а тем, насколько много поведения остаётся общим и
-              насколько тщательно проверена граница.
-            </div>
-          </div>
-        </section>
-        <footer>
-          <span>QUILL / CONDUIT</span>
-          <span>SCALA · ZIO · QUILL · VERT.X</span>
-          <a href="#top">НАВЕРХ ↑</a>
-        </footer>
-      </main>
-    </div>
-  </body>
+        </div>
+        <figcaption id="trace-caption" aria-live="polite">Во время ожидания оба JDBC-потока заняты своими вызовами. Fibers A и B приостановлены, event loop может обслуживать другие события.</figcaption>
+      </figure>
+      <p>Заблокированный поток обычно не расходует CPU, пока спит в ожидании сокета. Он остаётся занят этим вызовом, сохраняет стек и не может взять другую задачу. HikariCP переиспользует соединения, а Quill переносит JDBC-вызовы на blocking executor ZIO. Поэтому HTTP event loop свободен в обеих сборках. Разница здесь в том, сколько рабочих потоков удерживает ожидание SQL.</p>
+    </section>
+
+    <section id="event-loop" aria-labelledby="event-loop-title">
+      <h2 id="event-loop-title">Что делает event loop</h2>
+      <p>Vert.x SQL Client работает с PostgreSQL по сетевому протоколу через неблокирующие каналы Netty. Event loop обслуживает несколько каналов. Когда от конкретного сокета пока нечего читать, он может обработать другой сокет, таймер или поставленную в очередь задачу.</p>
+      <ol class="flow">
+        <li><strong>Запись.</strong> Клиент кодирует запрос и параметры, затем ставит данные на отправку. Если сокет временно не принимает всю запись, остаток ждёт готовности к записи.</li>
+        <li><strong>Готовность сокета.</strong> Транспорт ждёт готовности группы сокетов, например через epoll на Linux при использовании native transport Netty. Когда сокет доступен для чтения, цикл получает событие и запускает обработчик его канала. Один ответ может прийти несколькими порциями. Неполное сообщение остаётся в буфере до следующего чтения.</li>
+        <li><strong>Разбор протокола.</strong> Клиент собирает ответ из сообщений PostgreSQL, обрабатывает строки или ошибку и завершает <code>Future</code> операции.</li>
+        <li><strong>Продолжение.</strong> Callback передаёт результат в ZIO. Runtime планирует продолжение fiber, которая затем читает <code>RowSet</code> и строит объекты приложения.</li>
+      </ol>
+      <p>Обработчики событий одного цикла выполняются последовательно. Если такой обработчик долго считает или ждёт синхронный I/O, остальные каналы этого цикла тоже ждут. В нашем SQL-пути callback завершения передаёт результат в ZIO. Преобразование строк в Scala-объекты находится в продолжении эффекта.</p>
+      <p class="references"><a href="https://vertx.io/docs/vertx-core/java/">Vert.x Core: event loop и обработчики</a> · <a href="https://www.postgresql.org/docs/current/protocol-flow.html">PostgreSQL: обмен сообщениями</a></p>
+    </section>
+
+    <section id="quill" aria-labelledby="quill-title">
+      <h2 id="quill-title">От <code>ctx.run</code> до возобновления fiber</h2>
+      <div class="pipeline" aria-label="Путь SQL-запроса">
+        <span>QDSL<small>Quill</small></span><span aria-hidden="true">→</span>
+        <span>SQL + Tuple<small>контекст</small></span><span aria-hidden="true">→</span>
+        <span>Future&lt;RowSet&gt;<small>Vert.x</small></span><span aria-hidden="true">→</span>
+        <span>List[A]<small>ZIO и декодеры</small></span>
+      </div>
+      <p>Для статической quotation Quill строит SQL при компиляции. Во время исполнения контекст получает соединение из <code>Pool</code>, кодирует значения из <code>lift</code> в <code>Tuple</code> и вызывает <code>connection.preparedQuery(sql).execute(tuple)</code>. Vert.x возвращает <code>Future</code>. Адаптер <code>fromFuture</code> регистрирует обработчик завершения через <code>ZIO.async</code>.</p>
+      <p class="caption">Упрощённая схема моста. В реализации также обработаны синхронные исключения при создании Future и повторное завершение.</p>
+      <pre tabindex="0" aria-label="Адаптер Vert.x Future в ZIO"><code>ZIO.async[Any, Throwable, A] { resume =&gt;
+  future.onComplete { result =&gt;
+    if (result.succeeded()) resume(ZIO.succeed(result.result()))
+    else resume(ZIO.fail(result.cause()))
+  }
+}</code></pre>
+      <p>Пока операция не готова, fiber приостановлена. Состояние продолжения хранится в ZIO, поэтому оно не привязано к стеку ожидающего потока. После callback ZIO продолжает её через свой runtime. В коде контекста следующий эффект извлекает строки, запускает декодеры Quill и возвращает <code>List[A]</code>.</p>
+      <details>
+        <summary>Зачем драйверу свой слой привязки SQL-параметров</summary>
+        <p>Для PostgreSQL выражение <code>$1 IS NOT NULL</code> не даёт серверу достаточно информации о типе <code>$1</code>. Так обычные <code>getOrElse</code>, <code>isEmpty</code> и <code>forall</code> с lifted <code>Option</code> могли получить <code>42P18</code> при подготовке. Alpha.2 сохраняет тип <code>NULL</code> через кодек и передаёт его в SQL, например <code>($1)::text IS NOT NULL</code>. Остальные скалярные сравнения сохраняют вывод типа по столбцу, что важно для enum.</p>
+        <p>Тот же слой задаёт типы decimal и массивов и различает <code>json</code>, <code>jsonb</code>, SQL NULL и значение JSON <code>null</code>. Он работает и для курсоров, где statement готовится до передачи tuple.</p>
+      </details>
+      <p class="references"><a href="https://github.com/ffebr/zio-quill-vertx/blob/{{DRIVER_COMMIT}}/quill-vertx-zio/src/main/scala/zio/quill/context/vertx/VertxRuntime.scala">VertxRuntime</a> · <a href="https://github.com/ffebr/zio-quill-vertx/blob/{{DRIVER_COMMIT}}/quill-vertx-zio/src/main/scala/zio/quill/context/vertx/ZioVertxContext.scala">ZioVertxContext</a> · <a href="https://github.com/ffebr/zio-quill-vertx/blob/{{DRIVER_COMMIT}}/quill-vertx-zio/src/main/scala/zio/quill/context/vertx/VertxPostgresBindings.scala">PostgreSQL binding</a></p>
+    </section>
+
+    <section id="performance" aria-labelledby="performance-title">
+      <h2 id="performance-title">Где Vert.x может дать выигрыш</h2>
+      <p>Преимущество проявляется, когда много операций одновременно ждут сеть или сервер. Например, при 400 SQL-операциях в секунду и среднем времени ожидания 20 мс в устойчивом режиме в среднем <strong>8 операций находятся в ожидании</strong>. В синхронном JDBC-пути это около восьми занятых ожиданием потоков. В native-пути это восемь ожидающих операций, чьи сокеты обслуживает event loop. Это расчёт по закону Литтла на условных числах.</p>
+      <dl class="metrics">
+        <div><dt>Пул соединений</dt><dd>Обе сборки ограничены 16 соединениями. В показанном режиме, без конвейеризации запросов на одном соединении, остальные операции ждут выдачи соединения. При насыщении пула именно очередь может определять p99.</dd></div>
+        <div><dt>Работа PostgreSQL</dt><dd>Индексы, блокировки, планы и объём данных определяют серверную стоимость запроса. Смена транспорта сама по себе не ускоряет этот участок.</dd></div>
+        <div><dt>Работа клиента</dt><dd>Разбор протокола, декодирование строк и выделение памяти по-прежнему требуют CPU. Большой результат способен упереться именно в эти расходы.</dd></div>
+      </dl>
+      <p>Транзакция удерживает одно соединение до commit или rollback. Quill хранит его для текущей операции в <code>FiberRef</code>. Обычный <code>run</code> собирает весь результат. При чтении через <code>stream</code> контекст запрашивает порции у курсора, по умолчанию по 128 строк, и держит соединение до закрытия потока.</p>
+      <p>Для сравнения на своём приложении стоит фиксировать SQL, данные, лимит пула и нагрузку. Измерять отдельно время получения соединения, время SQL, p95/p99 запроса, число рабочих потоков и CPU приложения. Функциональные проверки этой демки показывают совпадение поведения, а сравнение производительности потребует такого прогона.</p>
+    </section>
+
+    <section id="integration" aria-labelledby="integration-title">
+      <h2 id="integration-title">Как это подключено в Conduit</h2>
+      <p>HTTP, сервисы и QDSL компилируются из общих исходников. В JDBC-сборке <code>Database</code> предоставляет <code>DataSource</code> через HikariCP. В native-сборке он предоставляет Vert.x <code>Pool</code>, созданный на экземпляре Vert.x приложения. Репозиторий в обоих случаях вызывает <code>database.execute(ctx.run(...))</code>.</p>
+      <p class="caption">Один из общих запросов · QuillUserRepository.byEmail</p>
+      <pre tabindex="0" aria-label="Поиск пользователя в общем Quill-репозитории"><code>{{USER_LOOKUP}}</code></pre>
+      <details>
+        <summary>Фабрика native-контекста и пула из демки</summary>
+        <pre tabindex="0" aria-label="Native Database.scala"><code>{{NATIVE_DATABASE}}</code></pre>
+      </details>
+      <p>Пакет для sbt — <code>"io.github.ffebr" %% "quill-vertx-zio" % "0.1.0-alpha.2"</code>. Для миграции меняются контекст, слой подключения и кодеки, использующие JDBC API. Quotations перекомпилируются с новым контекстом.</p>
+      <p class="references"><a href="https://github.com/ffebr/vertx-jdbc-challenge/blob/{{APP_COMMIT}}/submissions/scala-zio-vertx-quill-ffebr/shared/src/main/scala/conduit/persistence/QuillUserRepository.scala">Общий репозиторий</a> · <a href="https://github.com/ffebr/zio-quill-vertx/blob/master/docs/vertx/RELEASING.md#consume-a-published-version">Подключение GitHub Packages</a></p>
+    </section>
+
+    <section id="evidence" aria-labelledby="evidence-title">
+      <h2 id="evidence-title">Что проверено</h2>
+      <p>Релиз alpha.2 прошёл восемь заданий CI для PostgreSQL, MySQL, MariaDB и DB2 на двух версиях Scala. На Conduit обе сборки прошли по 197 исходных API-проверок и выдали совпадающие golden transcript. Отдельный прогон собрал демку с опубликованными jar.</p>
+      <p class="references"><a href="https://github.com/ffebr/zio-quill-vertx/actions/runs/43613000269">Матрица релиза</a> · <a href="https://github.com/ffebr/zio-quill-vertx/actions/runs/43614128553">Проверка опубликованных пакетов</a> · <a href="{{VALIDATION_URL}}">{{BUILD_STATUS}}</a></p>
+    </section>
+  </main>
+  <footer><span>Conduit · Quill Vert.x alpha.2</span><a href="#main">К началу ↑</a></footer>
+</body>
 </html>

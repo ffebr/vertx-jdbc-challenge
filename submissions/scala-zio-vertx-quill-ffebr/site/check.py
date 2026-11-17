@@ -6,18 +6,7 @@ import re
 import sys
 from urllib.parse import unquote, urlsplit
 
-REQUIRED = {
-    "overview",
-    "architecture",
-    "queries",
-    "async",
-    "bindings",
-    "resources",
-    "integration",
-    "review",
-    "evidence",
-    "limits",
-}
+REQUIRED = {"execution", "event-loop", "quill", "performance", "integration", "evidence"}
 
 
 class Audit(HTMLParser):

@@ -30,17 +30,10 @@ def read(rel):
 
 
 def snippets():
-    content = read("shared/src/main/scala/conduit/persistence/QuillContentRepository.scala")
     user = read("shared/src/main/scala/conduit/persistence/QuillUserRepository.scala")
-    service = read("shared/src/main/scala/conduit/service/ConduitService.scala")
     return {
-        "QDSL_SUMMARY": between(content, "private def articleSummaryBase", "private def loadTags"),
-        "QDSL_FEED": between(content, "def feed", "private def one"),
-        "USER_UPDATE": between(user, "override def update", "override def profile"),
+        "USER_LOOKUP": between(user, "override def byEmail", "override def byUsername"),
         "NATIVE_DATABASE": read("native/src/main/scala/conduit/persistence/Database.scala").strip(),
-        "JDBC_DATABASE": read("jdbc/src/main/scala/conduit/persistence/Database.scala").strip(),
-        "NAMED_PROJECTIONS": between(content, "private case class ArticleViewRow", "private case class TagRow"),
-        "SERVICE_VALIDATION": between(service, "private def optionalRequired", "private def session"),
     }
 
 

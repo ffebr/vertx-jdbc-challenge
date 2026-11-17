@@ -1,50 +1,28 @@
-(() => {
-  const toggle = document.querySelector("#option-toggle");
-  if (toggle) {
-    const state = document.querySelector("#option-state");
-    const source = document.querySelector("#binding-source");
-    const value = document.querySelector("#binding-value");
-    const type = document.querySelector("#binding-type");
-    const result = document.querySelector("#binding-result");
-    const parameterTypes = "$1 = text · $2 = text";
+const controls = document.querySelector("#trace-controls");
+const caption = document.querySelector("#trace-caption");
+const buttons = controls.querySelectorAll("[data-step]");
+const cells = document.querySelectorAll("[data-phase]");
 
-    const render = () => {
-      const present = toggle.checked;
-      state.textContent = present ? 'Some("new@example.test")' : "None";
-      source.textContent = present
-        ? 'lift(Some("new@example.test")).getOrElse(column)'
-        : "lift(None).getOrElse(column)";
-      value.textContent = present
-        ? '$1 = "new@example.test" · $2 = "new@example.test"'
-        : "$1 = NULL · $2 = NULL";
-      type.textContent = parameterTypes;
-      result.textContent = present
-        ? 'Ожидаемое значение email: "new@example.test" будет записано.'
-        : "Ожидаемое значение email: текущее значение сохранится.";
-    };
+const captions = [
+  "JDBC отправляет A и B из двух синхронных вызовов. Vert.x ставит обе записи на отправку через event loop.",
+  "Во время ожидания оба JDBC-потока заняты своими вызовами. Fibers A и B приостановлены, event loop может обслуживать другие события.",
+  "Сокет B готов к чтению. JDBC-поток B получает ответ. В Vert.x event loop разбирает ответ B, а завершение Future позволяет ZIO возобновить fiber B. Запрос A ещё выполняется.",
+  "Приходит ответ A. Последний JDBC-вызов возвращается, а в Vert.x завершение Future делает fiber A готовой к продолжению.",
+];
 
-    render();
-    toggle.addEventListener("change", render);
+function selectStep(step) {
+  for (const button of buttons) {
+    button.setAttribute("aria-pressed", String(button.dataset.step === step));
   }
-
-  const links = [...document.querySelectorAll(".rail nav a")];
-  if ("IntersectionObserver" in window) {
-    const observer = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          if (!entry.isIntersecting) continue;
-          links.forEach((link) => {
-            link.classList.toggle(
-              "active",
-              link.hash === `#${entry.target.id}`,
-            );
-          });
-        }
-      },
-      { rootMargin: "-18% 0px -70% 0px" },
-    );
-    document
-      .querySelectorAll(".chapter[id]")
-      .forEach((section) => observer.observe(section));
+  for (const cell of cells) {
+    cell.classList.toggle("selected", cell.dataset.phase === step);
   }
-})();
+  caption.textContent = captions[Number(step) - 1];
+}
+
+for (const button of buttons) {
+  button.addEventListener("click", () => selectStep(button.dataset.step));
+}
+
+selectStep("2");
+controls.hidden = false;
